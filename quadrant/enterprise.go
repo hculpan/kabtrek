@@ -1,10 +1,6 @@
 package quadrant
 
-// EnterpriseMaxEnergy is the maximum energy for the Enterprise
-const (
-	EnterpriseMaxEnergy    = 5000
-	EnterpriseMaxTorpedoes = 20
-)
+import "github.com/hculpan/kabtrek/game"
 
 // Enterprise : Information relating to the player ship
 type Enterprise struct {
@@ -22,9 +18,9 @@ func NewEnterprise(xloc int, yloc int) *Enterprise {
 	return &Enterprise{
 		X:         xloc,
 		Y:         yloc,
-		Energy:    EnterpriseMaxEnergy,
+		Energy:    game.EnterpriseMaxEnergy,
 		Shields:   0,
-		Torpedoes: EnterpriseMaxTorpedoes,
+		Torpedoes: game.EnterpriseMaxTorpedoes,
 	}
 }
 

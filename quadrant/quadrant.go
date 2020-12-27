@@ -5,7 +5,7 @@ import (
 	"strconv"
 
 	"github.com/gdamore/tcell/v2"
-	"github.com/hculpan/kabtrek/util"
+	"github.com/hculpan/kabtrek/game"
 )
 
 // Direction constants
@@ -25,7 +25,8 @@ const (
 // State of interface - which option currently selected
 const (
 	Normal = iota
-	Navigation
+	NavigationX
+	NavigationY
 	Weapons
 	Shields
 	Sensors
@@ -44,18 +45,22 @@ const (
 // Message type for ui messages
 type Message struct {
 	Text     string
-	Stardate float32
+	Stardate float64
 }
 
 // Quadrant : All the information related to a single Quadrant
 type Quadrant struct {
-	X                        int
-	Y                        int
-	Objects                  [10][10]Object
-	Player                   *Enterprise
-	Stardate                 float32
-	StartingNumberOfKlingons int
-	NumberOfKlingons         int
+	X                         int
+	Y                         int
+	Objects                   [10][10]Object
+	Player                    *Enterprise
+	StartingNumberOfKlingons  int
+	NumberOfKlingons          int
+	StartingNumberOfStarbases int
+	NumberOfStarbases         int
+	NumberOfStars             int
+	Scanned                   bool
+	Game                      game.Game
 
 	UIState       int
 	AwaitingInput bool
@@ -64,25 +69,30 @@ type Quadrant struct {
 	Messages []Message
 
 	// Private variables
-	blinkRed  int
-	torpedoes [10][10]*Torpedo
+	blinkRed     int
+	torpedoes    [10][10]*Torpedo
+	destinationX int
 }
 
 // NewQuadrant creates a new quadrant, populated with items
-func NewQuadrant(x int, y int, numKlingons int, numStars int, numBases int) *Quadrant {
+func NewQuadrant(parentGame game.Game, x int, y int, numKlingons int, numStars int, numBases int) *Quadrant {
 	result := &Quadrant{
-		X:                        x,
-		Y:                        y,
-		Objects:                  [10][10]Object{},
-		Player:                   nil,
-		Stardate:                 3100.1,
-		NumberOfKlingons:         numKlingons,
-		StartingNumberOfKlingons: numKlingons,
-		UIState:                  0,
-		AwaitingInput:            false,
-		CurrentInput:             "",
-		blinkRed:                 0,
-		torpedoes:                [10][10]*Torpedo{},
+		Game:                      parentGame,
+		X:                         x,
+		Y:                         y,
+		Objects:                   [10][10]Object{},
+		Player:                    nil,
+		NumberOfKlingons:          numKlingons,
+		StartingNumberOfKlingons:  numKlingons,
+		NumberOfStarbases:         numBases,
+		StartingNumberOfStarbases: numBases,
+		NumberOfStars:             numStars,
+		UIState:                   0,
+		AwaitingInput:             false,
+		Scanned:                   false,
+		CurrentInput:              "",
+		blinkRed:                  0,
+		torpedoes:                 [10][10]*Torpedo{},
 	}
 
 	result.blinkRed = 0
@@ -93,8 +103,8 @@ func NewQuadrant(x int, y int, numKlingons int, numStars int, numBases int) *Qua
 	result.NumberOfKlingons = numKlingons
 	klingonsToPlace := numKlingons
 	for klingonsToPlace > 0 {
-		xloc := util.RandomInt(10)
-		yloc := util.RandomInt(10)
+		xloc := game.RandomInt(10)
+		yloc := game.RandomInt(10)
 		if result.Objects[xloc][yloc] == nil {
 			result.Objects[xloc][yloc] = NewKlingon(xloc, yloc)
 			klingonsToPlace--
@@ -103,8 +113,8 @@ func NewQuadrant(x int, y int, numKlingons int, numStars int, numBases int) *Qua
 
 	starsToPlace := numStars
 	for starsToPlace > 0 {
-		xloc := util.RandomInt(10)
-		yloc := util.RandomInt(10)
+		xloc := game.RandomInt(10)
+		yloc := game.RandomInt(10)
 		if result.Objects[xloc][yloc] == nil {
 			result.Objects[xloc][yloc] = &Star{X: xloc, Y: yloc}
 			starsToPlace--
@@ -113,8 +123,8 @@ func NewQuadrant(x int, y int, numKlingons int, numStars int, numBases int) *Qua
 
 	basesToPlace := numBases
 	for basesToPlace > 0 {
-		xloc := util.RandomInt(10)
-		yloc := util.RandomInt(10)
+		xloc := game.RandomInt(10)
+		yloc := game.RandomInt(10)
 		if result.Objects[xloc][yloc] == nil {
 			result.Objects[xloc][yloc] = NewStarbase(xloc, yloc)
 			basesToPlace--
@@ -150,15 +160,15 @@ func (q *Quadrant) playerDockedAtBase() bool {
 }
 
 // UpdateState changes the current state of the UI
-func (q *Quadrant) UpdateState(scr tcell.Screen, newState int) {
+func (q *Quadrant) UpdateState(newState int) {
 	q.UIState = newState
-	if newState != Normal && newState != Weapons {
+	if newState != Normal && newState != Weapons && newState != NavigationX && newState != NavigationY {
 		q.AwaitingInput = true
 	} else {
 		q.AwaitingInput = false
 	}
 	q.CurrentInput = ""
-	q.Draw(scr)
+	q.Game.Draw()
 }
 
 // UpdateTorpedoes moves the torpedo along it's path
@@ -175,19 +185,20 @@ func (q *Quadrant) IsPlayerDead() bool {
 	return q.Player.Energy <= 0
 }
 
-func (q *Quadrant) damageObjectAt(x int, y int, damage int, descriptor string) {
+func (q *Quadrant) damageObjectAt(x int, y int, damage int, deiptor string) {
 	if q.Objects[x][y] == nil {
 		return
 	}
 
 	q.Objects[x][y].TakeDamage(TorpedoDamage)
-	q.AddMessage(fmt.Sprintf("%s at %d, %d took %d damage from a %s", q.Objects[x][y].Name(), x, y, damage, descriptor))
+	q.AddMessage(fmt.Sprintf("%s at %d, %d took %d damage from a %s", q.Objects[x][y].Name(), x, y, damage, deiptor))
 
 	if q.Objects[x][y].GetShields() <= 0 {
 		q.AddMessage(fmt.Sprintf("%s at %d, %d destroyed!", q.Objects[x][y].Name(), x, y))
 		switch q.Objects[x][y].(type) {
 		case *Klingon:
 			q.NumberOfKlingons--
+			q.Game.KlingonDestroyed()
 		}
 		q.Objects[x][y] = nil
 	}
@@ -223,8 +234,8 @@ func (q *Quadrant) klingonFireTorpedo(k *Klingon, dir int) {
 
 func (q *Quadrant) klingonAction(k *Klingon) {
 	x, y := k.Location()
-	if util.CheckPercent(66) {
-		if util.CheckPercent(25) {
+	if game.CheckPercent(66) {
+		if game.CheckPercent(25) {
 			// Fire torpedo
 			dx := x - q.Player.X
 			dy := y - q.Player.Y
@@ -248,7 +259,7 @@ func (q *Quadrant) klingonAction(k *Klingon) {
 		} else {
 			// Move
 			var o MoveableObject = q.Objects[x][y].(MoveableObject)
-			q.MoveObject(o, util.RandomInt(9)+1)
+			q.MoveObject(o, game.RandomInt(9)+1)
 		}
 	}
 }
@@ -256,13 +267,11 @@ func (q *Quadrant) klingonAction(k *Klingon) {
 // AddMessage adds a message to the messages display
 // Will be removed in 5 turns (stardate + 0.5)
 func (q *Quadrant) AddMessage(t string) {
-	q.Messages = append(q.Messages, Message{Text: t, Stardate: q.Stardate})
+	q.Messages = append(q.Messages, Message{Text: t, Stardate: q.Game.GetStardate()})
 }
 
 // Update processes the next turn for the quadrant
 func (q *Quadrant) Update() {
-	q.Stardate += 0.1
-
 	for x := 0; x < 10; x++ {
 		for y := 0; y < 10; y++ {
 			switch q.Objects[x][y].(type) {
@@ -273,47 +282,38 @@ func (q *Quadrant) Update() {
 	}
 
 	if q.playerDockedAtBase() {
-		q.Player.Energy += EnterpriseMaxEnergy * 0.25
-		if q.Player.Energy > EnterpriseMaxEnergy {
-			q.Player.Energy = EnterpriseMaxEnergy
+		q.Player.Energy += game.EnterpriseMaxEnergy * 0.25
+		if q.Player.Energy > game.EnterpriseMaxEnergy {
+			q.Player.Energy = game.EnterpriseMaxEnergy
 		}
-		q.Player.Torpedoes += EnterpriseMaxTorpedoes * 0.25
-		if q.Player.Torpedoes > EnterpriseMaxTorpedoes {
-			q.Player.Torpedoes = EnterpriseMaxTorpedoes
+		q.Player.Torpedoes += game.EnterpriseMaxTorpedoes * 0.25
+		if q.Player.Torpedoes > game.EnterpriseMaxTorpedoes {
+			q.Player.Torpedoes = game.EnterpriseMaxTorpedoes
 		}
 	}
-}
-
-// Draw draw's the quadrant
-func (q *Quadrant) Draw(scr tcell.Screen) {
-	scr.Sync()
-	scr.Clear()
-	q.DisplayQuadrant(scr)
-	q.DisplayStatus(scr)
-	q.displayState(scr)
-	q.displayMessages(scr)
-	scr.Show()
 }
 
 // DisplayQuadrant draws the Quadrant map
-func (q *Quadrant) DisplayQuadrant(scr tcell.Screen) {
+func (q *Quadrant) DisplayQuadrant() {
 	QuadrantStr := fmt.Sprintf("Quadrant : %d, %d", q.X+1, q.Y+1)
-	util.EmitStr(scr, 22-(len(QuadrantStr)/2), 0, tcell.StyleDefault, QuadrantStr)
-	util.EmitStr(scr, 3, 1, tcell.StyleDefault, "=---=---=---=---=---=---=---=---=---=---")
+	game.EmitStr(22-(len(QuadrantStr)/2), 0, QuadrantStr)
+	game.EmitStr(3, 1, "=---=---=---=---=---=---=---=---=---=---")
 	for i := 0; i < 10; i++ {
-		q.displayQuadrantLine(scr, i)
+		q.displayQuadrantLine(i)
 	}
-	util.EmitStr(scr, 3, 12, tcell.StyleDefault, "=-1-=-2-=-3-=-4-=-5-=-6-=-7-=-8-=-9-=-10")
+	game.EmitStr(3, 12, "=-1-=-2-=-3-=-4-=-5-=-6-=-7-=-8-=-9-=-10")
 }
 
-func (q *Quadrant) displayMessages(scr tcell.Screen) {
+// DisplayMessages displays all the messages in order,
+// removing any greater than 0.5 Stardates old
+func (q *Quadrant) DisplayMessages() {
 	for i, t := range q.Messages {
-		util.EmitStr(scr, 1, 16+i, tcell.StyleDefault, fmt.Sprintf("Stardate %.1f: %s", t.Stardate, t.Text))
+		game.EmitStr(1, 16+i, fmt.Sprintf("Stardate %.1f: %s", t.Stardate, t.Text))
 	}
 
 	// Remove older messages
 	for len(q.Messages) > 0 {
-		if q.Messages[0].Stardate < q.Stardate-0.5 {
+		if q.Messages[0].Stardate < q.Game.GetStardate()-0.5 {
 			q.Messages = q.Messages[1:]
 		} else {
 			break
@@ -321,7 +321,7 @@ func (q *Quadrant) displayMessages(scr tcell.Screen) {
 	}
 }
 
-func (q *Quadrant) displaySector(scr tcell.Screen, x int, y int) {
+func (q *Quadrant) displaySector(x int, y int) {
 	if q.Objects[x][y] != nil {
 		objStr := ""
 		switch q.Objects[x][y].(type) {
@@ -334,38 +334,56 @@ func (q *Quadrant) displaySector(scr tcell.Screen, x int, y int) {
 		case *Starbase:
 			objStr = ">B<"
 		}
-		util.EmitStr(scr, x*4+4, y+2, tcell.StyleDefault, objStr)
+		game.EmitStr(x*4+4, y+2, objStr)
 	} else if q.torpedoes[x][y] != nil {
-		util.EmitStr(scr, x*4+4, y+2, tcell.StyleDefault, " @ ")
+		game.EmitStr(x*4+4, y+2, " @ ")
 	}
 
 }
 
-func (q *Quadrant) displayQuadrantLine(scr tcell.Screen, row int) {
-	util.EmitStr(scr, 0, row+2, tcell.StyleDefault, fmt.Sprintf("%2d|                                        |", row+1))
+func (q *Quadrant) displayQuadrantLine(row int) {
+	game.EmitStr(0, row+2, fmt.Sprintf("%2d|                                        |", row+1))
 
 	for i := 0; i < 10; i++ {
-		q.displaySector(scr, i, row)
+		q.displaySector(i, row)
 	}
 }
 
 // HandleKeyForState handles the current key for the various ui states
-func (q *Quadrant) HandleKeyForState(scr tcell.Screen, key tcell.EventKey) {
+func (q *Quadrant) HandleKeyForState(key tcell.EventKey) {
 	switch q.UIState {
 	case Weapons:
 		switch int(key.Rune()) {
 		case 'p', 'P':
-			q.UpdateState(scr, WeaponsPhasers)
-			q.Draw(scr)
+			q.UpdateState(WeaponsPhasers)
+			q.Game.Draw()
 		case 't', 'T':
-			q.UpdateState(scr, WeaponsTorpedoes)
-			q.Draw(scr)
+			q.UpdateState(WeaponsTorpedoes)
+			q.Game.Draw()
+		}
+	case NavigationX:
+		num := int(key.Rune())
+		if num >= 49 && num <= 56 {
+			q.destinationX = num - 48
+			q.UpdateState(NavigationY)
+		}
+	case NavigationY:
+		num := int(key.Rune())
+		if num >= 49 && num <= 56 {
+			q.UpdateState(Normal)
+			d := game.Distance(q.X, q.Y, q.destinationX-1, num-49)
+			if q.Player.Energy < int(d*100) {
+				q.AddMessage("You do not have enough energy for that trip")
+			} else {
+				q.Player.Energy -= int(d * 100)
+				q.Game.NavigateTo(q.destinationX-1, num-49)
+			}
 		}
 	}
 }
 
 // AcceptInput accepts whatever the player has typed for input
-func (q *Quadrant) AcceptInput(scr tcell.Screen) {
+func (q *Quadrant) AcceptInput() {
 	value, _ := strconv.Atoi(q.CurrentInput)
 	switch q.UIState {
 	case Shields:
@@ -385,52 +403,58 @@ func (q *Quadrant) AcceptInput(scr tcell.Screen) {
 			q.updateTorpedoAt(q.Player.X, q.Player.Y)
 		}
 	}
-	q.UpdateState(scr, Normal)
-	q.Draw(scr)
+	q.UpdateState(Normal)
+	q.Game.Draw()
 }
 
-func (q *Quadrant) displayState(scr tcell.Screen) {
+// DisplayState renders the bottom display
+// based on the state of the UI
+func (q *Quadrant) DisplayState() {
 	switch q.UIState {
 	case Normal:
-		util.EmitStr(scr, 1, 14, tcell.StyleDefault, "(N)avigation   (W)eapons   (S)hields  S(e)nsors  Ship's (C)omputer")
+		game.EmitStr(1, 14, "(N)avigation   (W)eapons   (S)hields  (L)ong-Range Sensors  Ship's (C)omputer")
 	case Shields:
-		util.EmitStr(scr, 1, 14, tcell.StyleDefault, "Set energy for shields: ")
-		q.displayInput(scr, 25, 14)
+		game.EmitStr(1, 14, "Set energy for shields: ")
+		q.displayInput(25, 14)
 	case Weapons:
-		util.EmitStr(scr, 1, 14, tcell.StyleDefault, "(P)hasers or Photon (T)orpedoes")
+		game.EmitStr(1, 14, "(P)hasers or Photon (T)orpedoes")
 	case WeaponsTorpedoes:
-		util.EmitStr(scr, 1, 14, tcell.StyleDefault, "Direction:")
-		q.displayInput(scr, 12, 14)
+		game.EmitStr(1, 14, "Direction:")
+		q.displayInput(12, 14)
+	case NavigationX:
+		game.EmitStr(1, 14, "Destination Quadrant X:")
+	case NavigationY:
+		game.EmitStr(1, 14, "Destination Quadrant Y:")
 	}
 }
 
-func (q *Quadrant) displayInput(scr tcell.Screen, col int, row int) {
-	util.EmitStr(scr, col, row, tcell.StyleDefault, q.CurrentInput)
+func (q *Quadrant) displayInput(col int, row int) {
+	game.EmitStr(col, row, q.CurrentInput)
 	if q.blinkRed%2 == 0 {
-		util.EmitStr(scr, col+len(q.CurrentInput), row, tcell.StyleDefault, "_")
+		game.EmitStr(col+len(q.CurrentInput), row, "_")
 	}
 }
 
 // DisplayStatus draws the status of the quadrant (the stuff to the right of the map)
-func (q *Quadrant) DisplayStatus(scr tcell.Screen) {
+func (q *Quadrant) DisplayStatus() {
 	q.blinkRed++
-	util.EmitStr(scr, 46, 3, tcell.StyleDefault, fmt.Sprintf("STARDATE:         %.1f", q.Stardate))
-	util.EmitStr(scr, 46, 4, tcell.StyleDefault, fmt.Sprintf("SECTOR:           %d,%d", q.Player.X, q.Player.Y))
+	game.EmitStr(49, 3, fmt.Sprintf("STARDATE:         %.1f", q.Game.GetStardate()))
+	game.EmitStr(49, 4, fmt.Sprintf("SECTOR:           %d,%d", q.Player.X, q.Player.Y))
 
 	if q.playerDockedAtBase() {
-		util.EmitStr(scr, 46, 5, tcell.StyleDefault, "CONDITION:        DOCKED")
+		game.EmitStr(49, 5, "CONDITION:        DOCKED")
 	} else if q.NumberOfKlingons > 0 && q.blinkRed%2 == 1 {
-		util.EmitStr(scr, 46, 5, tcell.StyleDefault, "CONDITION:        RED")
+		game.EmitStr(49, 5, "CONDITION:        RED")
 	} else if q.NumberOfKlingons > 0 {
-		util.EmitStr(scr, 46, 5, tcell.StyleDefault, "CONDITION: ")
+		game.EmitStr(49, 5, "CONDITION: ")
 	} else {
-		util.EmitStr(scr, 46, 5, tcell.StyleDefault, "CONDITION:        GREEN")
+		game.EmitStr(49, 5, "CONDITION:        GREEN")
 	}
 
-	util.EmitStr(scr, 46, 6, tcell.StyleDefault, fmt.Sprintf("SHIELDS:          %d", q.Player.Shields))
-	util.EmitStr(scr, 46, 7, tcell.StyleDefault, fmt.Sprintf("ENERGY:           %d", q.Player.Energy))
-	util.EmitStr(scr, 46, 8, tcell.StyleDefault, fmt.Sprintf("PHOTON TORPEDOES: %d", q.Player.Torpedoes))
-	util.EmitStr(scr, 46, 10, tcell.StyleDefault, fmt.Sprintf("KLINGONS:         %d", q.NumberOfKlingons))
+	game.EmitStr(49, 6, fmt.Sprintf("SHIELDS:          %d", q.Player.Shields))
+	game.EmitStr(49, 7, fmt.Sprintf("ENERGY:           %d", q.Player.Energy))
+	game.EmitStr(49, 8, fmt.Sprintf("PHOTON TORPEDOES: %d", q.Player.Torpedoes))
+	game.EmitStr(49, 10, fmt.Sprintf("KLINGONS:         %d", q.Game.GetRemainingKlingons()))
 }
 
 func newLocation(ox int, oy int, direction int) (int, int) {
